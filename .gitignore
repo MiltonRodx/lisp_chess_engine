@@ -15,3 +15,6 @@
 *.sx32fsl
 *.wx64fsl
 *.wx32fsl
+.vscode
+# built executable
+/lisp-chess-engine

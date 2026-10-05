@@ -1,0 +1,107 @@
+(in-package #:chess)
+
+;; ==========================================
+;; Entry points: interactive REPL, batch helpers, binary main.
+;; ==========================================
+
+(defun play-repl (&optional (game *game*))
+  "Human-vs-engine REPL. You play both sides or one side; type 'help'."
+  (format t "~&=== lisp-chess-engine ~a ===~%" "0.1.0")
+  (format t "Commands: <move e.g. e2e4> | go [depth] | new | fen | perft [d] | undo | help | quit~%")
+  (print-board game)
+  (let ((move-stack nil))
+    (labels ((do-move (m)
+               (make-move-on-board game m)
+               (push m move-stack)
+               (print-board game)
+               (%repl-game-over-p game)))
+      (loop
+        (format t "~a to move> " (chess-game-side-to-move game))
+        (finish-output)
+        (let ((line (read-line *standard-input* nil nil)))
+          (unless line (return))
+          (let ((tokens (%uci-tokens line)))
+            (when (null tokens) (return))
+            (let ((cmd (string-downcase (first tokens))))
+              (cond
+                ((or (string= cmd "quit") (string= cmd "exit")) (return))
+                ((string= cmd "help")
+                 (format t "  e2e4/e7e8q : play a move~%  go [depth]   : engine moves (default 3)~%  new         : reset board~%  undo        : take back last move~%  fen         : print FEN~%  perft [d]   : node count~%  moves       : list legal moves~%  quit        : exit~%"))
+                ((string= cmd "new")
+                 (setup-initial-position game) (setf move-stack nil) (print-board game))
+                ((string= cmd "undo")
+                 (if move-stack
+                     (progn (unmake-move-on-board game (pop move-stack))
+                            (print-board game))
+                     (format t "nothing to undo.~%")))
+                ((string= cmd "fen")
+                 (format t "~a~%" (game-to-fen game)))
+                ((string= cmd "perft")
+                 (let ((d (if (rest tokens) (parse-integer (second tokens)) 3)))
+                   (format t "perft(~a) = ~a~%" d (perft game d))))
+                ((string= cmd "moves")
+                 (dolist (m (generate-legal-moves game))
+                   (format t "~a " (move-to-string m)))
+                 (terpri))
+                ((string= cmd "go")
+                 (let* ((depth (if (rest tokens) (parse-integer (second tokens)) 3))
+                        (played (%repl-engine-move game depth)))
+                   (when played (push played move-stack))))
+                (t
+                 ;; try as a move
+                 (handler-case
+                     (let* ((parsed (parse-move-string (first tokens)
+                                                       (chess-game-side-to-move game)))
+                            (found (find-if (lambda (m) (move-matches-p m parsed))
+                                            (generate-legal-moves game))))
+                       (if found
+                           (do-move found)
+                           (format t "illegal move: ~a~%" (first tokens))))
+                   (error (c) (format t "error: ~a~%" c))))))))))))
+
+(defun %repl-engine-move (game depth)
+  "Engine makes a move on GAME. Returns the move played, or NIL."
+  (let ((moves (generate-legal-moves game)))
+    (cond ((null moves)
+           (%repl-game-over-p game)
+           nil)
+          (t
+           (format t "thinking (depth ~a)...~%" depth)
+           (finish-output)
+           (multiple-value-bind (best score done nodes)
+               (search-with-limits game :depth depth)
+             (declare (ignore done))
+             (format t "engine plays ~a (score ~a, nodes ~a)~%"
+                     (move-to-string best) score nodes)
+             (make-move-on-board game best)
+             (print-board game)
+             (%repl-game-over-p game)
+             best)))))
+
+(defun %repl-game-over-p (game)
+  (let ((moves (generate-legal-moves game)))
+    (cond ((null moves)
+           (if (in-check-p game (chess-game-side-to-move game))
+               (format t "CHECKMATE. ~a wins.~%" (opposite-color (chess-game-side-to-move game)))
+               (format t "STALEMATE. Draw.~%"))
+           t)
+          ((>= (chess-game-halfmove-clock game) 100)
+           (format t "Draw by fifty-move rule.~%") t)
+          ((insufficient-material-p game)
+           (format t "Draw by insufficient material.~%") t)
+          (t nil))))
+
+(defun main ()
+  "Binary entry point. Dispatch on argv: --uci | --perft N [fen] | --help."
+  (let ((args (cdr sb-ext:*posix-argv*)))
+    (cond ((member "--uci" args :test #'string=)
+           (run-uci-loop))
+          ((member "--perft" args :test #'string=)
+           (let* ((pos (position "--perft" args :test #'string=))
+                  (d (parse-integer (or (nth (1+ pos) args) "3"))))
+             (format t "~a~%" (perft *game* d))))
+          ((or (member "--help" args :test #'string=)
+               (member "-h" args :test #'string=))
+           (format t "Usage: lisp-chess-engine [--uci | --perft N | --repl]~%"))
+          (t (play-repl *game*))))
+  (values))
